@@ -2,10 +2,11 @@
 name = "debugutils"
 version = "0.1.0"
 description = ""
-authors = ["'Gilad Barnea' <cr-gbarn-herolo@allot.com>"]
+authors = ["'Gilad Barnea' <giladbrn@gmail.com>"]
 
 [tool.poetry.dependencies]
 python = "^3.8"
+rich = "^10.11.0"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"
