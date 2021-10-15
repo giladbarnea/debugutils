@@ -48,7 +48,7 @@ def shorten(s, limit=termwidth):
         # print(f'{limit = } | {length = } | {real_length = } | {left_cutoff = } | {right_cutoff = } | {half_the_limit = } | {escape_seq_start_index = } | {escape_seq_start_rindex = }')
     left_cutoff = max(half_the_limit - 3, 1)
     right_cutoff = max(half_the_limit - 4, 1)
-        # print(f'{limit = } | {length = } | {left_cutoff = } | {right_cutoff = } | {half_the_limit = }')
+    # print(f'{limit = } | {length = } | {left_cutoff = } | {right_cutoff = } | {half_the_limit = }')
     free_chars = limit - left_cutoff - right_cutoff
     assert free_chars > 0, f'{free_chars = } not > 0'
     beginning = s[:left_cutoff]
