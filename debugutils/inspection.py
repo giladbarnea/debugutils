@@ -9,6 +9,7 @@ exec(compile(Path(debug := os.getenv("PYTHONDEBUGFILE", Path(os.getenv("HOME")) 
 
 import os
 
+
 # os.getenv('DEBUGFILE_LOADED')
 import sys
 from typing import Union, Tuple, List, NoReturn, Literal
@@ -32,6 +33,8 @@ except ModuleNotFoundError:
 import inspect as inspect_
 import re
 from rich.console import Console
+
+COMMA_SEP_VALUE_RE = re.compile(r'[^,]+')
 
 
 # TODO: instead of patching builtins, get namespace (print this file's locals when called from IPython etc)
@@ -57,6 +60,7 @@ def __build_getprops_getmeths():
         if only is not None:
             regular = private = dunder = False
             if isinstance(only, str):
+                # noinspection PyTypeChecker
                 regular, private, dunder = __build_constraint(only, regular, private, dunder)
             else:  # iterable
                 for constraint in only:
@@ -214,6 +218,7 @@ def __build_getprops_getmeths():
     def _inspectfn(fn: callable) -> NoReturn:
         """Calls all relevant functions from `inspect` module on `fn` and prints the results.
         Doesn't return anything."""
+        # noinspection PyTypeChecker
         for inspectmethname in filter(lambda m: str(m)
                                                 not in ('getsource', 'getsourcelines', 'findsource', 'getmembers'),
                                       _getmeths(inspect_)):
@@ -235,59 +240,133 @@ con = Console(log_time_format='[%d.%m.%Y][%T]', file=sys.stderr)
 
 
 
-def _get_caller_frame_info(offset=2) -> inspect_.FrameInfo:
+def caller_finfo(offset=2) -> inspect_.FrameInfo:
     currframe = inspect_.currentframe()
     outer = inspect_.getouterframes(currframe)
     frameinfo = outer[offset]
     return frameinfo
 
 
-def _get_var_info(arg_idx=0,
-                  offset_or_frameinfo: Union[int, inspect_.FrameInfo] = 2,
-                  *,
-                  with_filename=True,
-                  with_fnname=True) -> str:
+def _unclosed(_s: str) -> bool:
+    return (_s.count('(') != _s.count(')')
+            or _s.count('[') != _s.count(']')
+            or _s.count('{') != _s.count('}'))
+
+
+def _get_argnames(_ctx: str) -> list[str]:
+    """
+    >>> _get_argnames('(self, *args, **kwargs):')
+    ['self', '*args', '**kwargs']
+    """
+    # TODO (bug): print(topic_name, partition_key, title='ConfluentKafkaTool.send_bytes_message(topic_name, partition_key, data_bytes)')
+    _inside_parenthesis = _ctx[_ctx.index('(') + 1:_ctx.rindex(')')]
+    
+    # 'foo, bar=(1)' -> 'foo, bar='
+    _inside_parenthesis = re.sub(r'\(.*\)', '', _inside_parenthesis)
+    _matches = list(COMMA_SEP_VALUE_RE.finditer(_inside_parenthesis))
+    _argnames = []
+    i = 0
+    _matches_len = len(_matches)
+    while i < _matches_len:
+        _match = _matches[i]
+        _group = _match.group().strip()
+        
+        # 'bar =' -> 'bar'
+        _group = re.sub('\s*=.*', '', _group)
+        if _unclosed(_group):
+            # bug? always i+=2?
+            _next_group = _matches[i + 1].group()
+            if _unclosed(_next_group):
+                _merged = _group + _next_group
+                _argnames.append(_merged)
+            else:
+                # bummer
+                _argnames.append(_group)
+                _argnames.append(_next_group)
+            i += 2
+            continue
+        _argnames.append(_group)
+        i += 1
+    return _argnames
+
+
+def varinfo(arg_idx=0,
+            value="__UNSET__",
+            offset_or_frameinfo: Union[int, inspect_.FrameInfo] = 2,
+            *,
+            with_filename=True,
+            with_fnname=True) -> str:
+    """
+    >>> def foo(bar):
+    ...     print(varinfo())
+    [rs_events_handler.py][__init__(...)] devices
+    """
+    
+    output = ''
     try:
         if isinstance(offset_or_frameinfo, int):
-            frameinfo = _get_caller_frame_info(offset_or_frameinfo + 1)
+            offset = offset_or_frameinfo
+            frameinfo = caller_finfo(offset)
         else:
             frameinfo = offset_or_frameinfo
-        ctx = frameinfo.code_context[0].strip()
-        output = ''
-        if with_filename:
-            output += f'{frameinfo.filename.split("/")[-1]} | '
-        if with_fnname:
-            output += f'{frameinfo.function}() | '
         
-        argnames = ctx[ctx.find('(') + 1:-1].split(', ')
-        if arg_idx is None:
-            output += ', '.join(map(str.strip, argnames))
-        else:
-            output += argnames[arg_idx].strip()
+        # con.log(f'[debug] varinfo() | {frameinfo = }')
+        if with_filename:
+            filename = frameinfo.filename
+            output += pretty_repr(f'[dim][{filename.split("/")[-1]}][/dim]')
+        
+        if with_fnname:
+            output += pretty_repr(f'[dim][{frameinfo.function}(...)][/dim]')
+        
+        try_get_argname_from_locals = not bool(frameinfo.code_context)
+        if frameinfo.code_context:
+            ctx = frameinfo.code_context[0].strip()
+            if more_contexts := frameinfo.code_context[1:]:
+                con.log(f'[debug] varinfo() | {ctx = } | {more_contexts = }')
+            
+            try:
+                argnames: list[str] = _get_argnames(ctx)
+            except ValueError:
+                con.log(f'[WARN] varinfo._get_argnames({ctx = !r}) | no (parenthesis), trying to get argnames from locals')
+                try_get_argname_from_locals = True
+            else:
+                try:
+                    output += argnames[arg_idx]
+                except IndexError:
+                    con.log(f'[WARN] IndexError: varinfo() | argnames[{arg_idx}] | {argnames = }')
+                    try_get_argname_from_locals = True
+        
+        if try_get_argname_from_locals and value != "__UNSET__":
+            f_locals = frameinfo.frame.f_locals
+            for k, v in f_locals.items():
+                with suppress(TypeError):
+                    if v is value:
+                        output += k
         return output
     except Exception as e:
-        con.log(f'_get_var_info({arg_idx = !r}, {offset_or_frameinfo = !r}, {with_filename = }, {with_fnname = })', e.__class__.__qualname__, e)
-        return ""
+        # noinspection PyUnboundLocalVariable
+        con.log(f'[WARN] {e.__class__.__qualname__}: varinfo({arg_idx = !r}, {value = !r}, {frameinfo.code_context = !r}) | {e}')
+        return output
 
 
 def what(obj, **kwargs):
     """rich.inspect(methods=True)"""
-    rich.inspect(obj, methods=True, title=_get_var_info(), **kwargs)
+    rich.inspect(obj, methods=True, title=varinfo(), **kwargs)
 
 
 def ww(obj, **kwargs):
     """rich.inspect(methods=True, help=True)"""
-    rich.inspect(obj, methods=True, help=True, title=_get_var_info(), **kwargs)
+    rich.inspect(obj, methods=True, help=True, title=varinfo(), **kwargs)
 
 
 def www(obj, **kwargs):
     """rich.inspect(methods=True, help=True, private=True)"""
-    rich.inspect(obj, methods=True, help=True, private=True, title=_get_var_info(), **kwargs)
+    rich.inspect(obj, methods=True, help=True, private=True, title=varinfo(), **kwargs)
 
 
 def wwww(obj, **kwargs):
     """rich.inspect(all=True)"""
-    rich.inspect(obj, all=True, title=_get_var_info(), **kwargs)
+    rich.inspect(obj, all=True, title=varinfo(), **kwargs)
 
 
 def who():
@@ -298,12 +377,11 @@ def who():
 builtins.sys = sys
 builtins.rich = rich
 builtins.inspect = inspect_
-builtins._get_var_info = _get_var_info
-builtins._get_caller_frame_info = _get_caller_frame_info
+builtins.varinfo = varinfo
+builtins.caller_finfo = caller_finfo
 builtins.getprops = getprops
 builtins.getmeths = getmeths
 builtins.inspectfn = inspectfn
-builtins.mm = mm
 builtins.what = what
 builtins.ww = ww
 builtins.www = www
@@ -366,11 +444,11 @@ if os.getenv('DEBUGFILE_PATCH_PRINT', '').lower() in ('1', 'true', 'yes') or any
     def print_patch(*args, **kwargs):
         """Keyword args support `offset = 2`, `with_filename = True`, `with_fnname = True`"""
         formatted_args = []
-        caller_frameinfo = _get_caller_frame_info(offset=kwargs.pop('offset', 2))
+        caller_frameinfo = caller_finfo(offset=kwargs.pop('offset', 2))
         with_filename = kwargs.pop('with_filename', True)
         with_fnname = kwargs.pop('with_fnname', True)
         for i, arg in enumerate(args):
-            var_info = _get_var_info(i,
+            var_info = varinfo(i,
                                      offset_or_frameinfo=caller_frameinfo,
                                      with_filename=not i and with_filename,
                                      with_fnname=not i and with_fnname)
@@ -401,6 +479,7 @@ if os.getenv('DEBUGFILE_PATCH_LOGGING') or any(arg == '--patch-logging' for arg 
     import logging
     
     try:
+        # noinspection PyUnresolvedReferences
         import loguru
     except ModuleNotFoundError:
         pass
